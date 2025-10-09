@@ -1528,8 +1528,12 @@ def _build_file(media_reference, br_map):
     if not file_e.find("media"):
         file_media_e = _get_or_create_subelement(file_e, "media")
 
-        audio_exts = {'.wav', '.aac', '.mp3', '.aif', '.aiff', '.m4a'}
-        has_video = (os.path.splitext(url_path)[1].lower() not in audio_exts)
+        if isinstance(media_reference, schema.GeneratorReference):
+            has_video = False
+        else:
+            audio_exts = {'.wav', '.aac', '.mp3', '.aif', '.aiff', '.m4a'}
+            has_video = (os.path.splitext(url_path)[1].lower() not in audio_exts)
+
         if has_video and file_media_e.find("video") is None:
             _append_new_sub_element(file_media_e, "video")
 
