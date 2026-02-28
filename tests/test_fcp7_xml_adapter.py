@@ -37,6 +37,9 @@ ENABLE_PROPERTY_EXAMPLE_PATH = os.path.join(
 OTIO_IMG_SEQ_MEDIA_REFERENCE_PATH = os.path.join(
     SAMPLE_DATA_DIR, "img_seq_media_reference.otio"
 )
+TRANSITIONS_EXAMPLE_PATH = os.path.join(
+    SAMPLE_DATA_DIR, "transitions_example.xml"
+)
 
 
 class TestFcp7XmlUtilities(unittest.TestCase, test_utils.OTIOAssertions):
@@ -931,6 +934,120 @@ class TestFcp7XmlElements(unittest.TestCase, test_utils.OTIOAssertions):
             transition.transition_type,
             schema.TransitionTypes.SMPTE_Dissolve,
         )
+        
+        # Check metadata preservation
+        self.assertIn("fcp_xml", transition.metadata)
+        self.assertEqual(transition.metadata["fcp_xml"]["alignment"], "end-black")
+        
+        # Check effect metadata
+        effect_meta = transition.metadata["fcp_xml"]["effect"]
+        self.assertEqual(effect_meta["effectcategory"], "Dissolve")
+        self.assertEqual(effect_meta["effecttype"], "transition")
+        self.assertEqual(effect_meta["mediatype"], "video")
+    
+    def test_transition_wipe_type_detection(self):
+        """Test that wipe transitions are correctly detected"""
+        wipe_element = cElementTree.fromstring(
+            """
+            <transitionitem>
+              <start>100</start>
+              <end>120</end>
+              <alignment>center</alignment>
+              <rate>
+                <timebase>24</timebase>
+                <ntsc>FALSE</ntsc>
+              </rate>
+              <effect>
+                <name>Wipe Right</name>
+                <effectid>Wipe</effectid>
+                <effecttype>transition</effecttype>
+                <mediatype>video</mediatype>
+              </effect>
+            </transitionitem>
+            """
+        )
+        
+        context = self.adapter._Context(cElementTree.fromstring(
+            "<track><rate><timebase>24</timebase><ntsc>FALSE</ntsc></rate></track>"
+        ))
+        
+        parser = self.adapter.FCP7XMLParser(wipe_element)
+        transition = parser.transition_for_element(wipe_element, context)
+        
+        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom_Wipe)
+        self.assertEqual(transition.name, "Wipe Right")
+    
+    def test_transition_fade_type_detection(self):
+        """Test that fade transitions are correctly detected"""
+        fade_element = cElementTree.fromstring(
+            """
+            <transitionitem>
+              <start>200</start>
+              <end>220</end>
+              <alignment>start-black</alignment>
+              <rate>
+                <timebase>24</timebase>
+                <ntsc>FALSE</ntsc>
+              </rate>
+              <effect>
+                <name>Fade In</name>
+                <effectid>Dip to Color Dissolve</effectid>
+                <effecttype>transition</effecttype>
+                <mediatype>video</mediatype>
+              </effect>
+            </transitionitem>
+            """
+        )
+        
+        context = self.adapter._Context(cElementTree.fromstring(
+            "<track><rate><timebase>24</timebase><ntsc>FALSE</ntsc></rate></track>"
+        ))
+        
+        parser = self.adapter.FCP7XMLParser(fade_element)
+        transition = parser.transition_for_element(fade_element, context)
+        
+        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom_Fade)
+        self.assertEqual(transition.name, "Fade In")
+    
+    def test_audio_transition_detection(self):
+        """Test that audio transitions are correctly identified"""
+        audio_transition = cElementTree.fromstring(
+            """
+            <transitionitem>
+              <start>100</start>
+              <end>124</end>
+              <alignment>center</alignment>
+              <rate>
+                <timebase>48000</timebase>
+                <ntsc>FALSE</ntsc>
+              </rate>
+              <effect>
+                <name>Audio Crossfade</name>
+                <effectid>Cross Fade (0 dB)</effectid>
+                <effecttype>transition</effecttype>
+                <mediatype>audio</mediatype>
+              </effect>
+            </transitionitem>
+            """
+        )
+        
+        # Test the helper function
+        is_audio = self.adapter._is_audio_transition(audio_transition)
+        self.assertTrue(is_audio)
+        
+        # Test with video transition
+        video_transition = cElementTree.fromstring(
+            """
+            <transitionitem>
+              <effect>
+                <mediatype>video</mediatype>
+              </effect>
+            </transitionitem>
+            """
+        )
+        
+        is_video = self.adapter._is_audio_transition(video_transition)
+        self.assertFalse(is_video)
 
 
 class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
@@ -1505,6 +1622,354 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
 
         # OTIO -> tempfile.xml
         adapters.write_to_file(timeline, tmp_path)
+    
+    def test_build_transition_item(self):
+        """Test building transition XML from OTIO transition objects"""
+        # Create a centered dissolve transition
+        transition = schema.Transition(
+            name="My Dissolve",
+            transition_type=schema.TransitionTypes.SMPTE_Dissolve,
+            in_offset=opentime.RationalTime(15, 24),
+            out_offset=opentime.RationalTime(15, 24),
+        )
+        
+        timeline_range = opentime.TimeRange(
+            start_time=opentime.RationalTime(100, 24),
+            duration=opentime.RationalTime(30, 24),
+        )
+        
+        br_map = {}
+        transition_e = self.adapter._build_transition_item(
+            transition,
+            timeline_range,
+            [None, None],
+            br_map,
+        )
+        
+        self.assertEqual(transition_e.tag, "transitionitem")
+        self.assertEqual(transition_e.find("./start").text, "100")
+        self.assertEqual(transition_e.find("./end").text, "130")
+        self.assertEqual(transition_e.find("./alignment").text, "center")
+        
+        effect_e = transition_e.find("./effect")
+        self.assertIsNotNone(effect_e)
+        self.assertEqual(effect_e.find("./name").text, "My Dissolve")
+        self.assertEqual(effect_e.find("./effectid").text, "Cross Dissolve")
+        self.assertEqual(effect_e.find("./effecttype").text, "transition")
+        self.assertEqual(effect_e.find("./mediatype").text, "video")
+    
+    def test_build_transition_item_wipe(self):
+        """Test building wipe transition with metadata"""
+        transition = schema.Transition(
+            name="Wipe Right",
+            transition_type=schema.TransitionTypes.Custom_Wipe,
+            in_offset=opentime.RationalTime(20, 24),
+            out_offset=opentime.RationalTime(20, 24),
+            metadata={
+                "fcp_xml": {
+                    "effect": {
+                        "effectid": "Wipe",
+                        "parameter": {
+                            "name": "Direction",
+                            "value": "0",
+                        }
+                    }
+                }
+            }
+        )
+        
+        timeline_range = opentime.TimeRange(
+            start_time=opentime.RationalTime(200, 24),
+            duration=opentime.RationalTime(40, 24),
+        )
+        
+        br_map = {}
+        transition_e = self.adapter._build_transition_item(
+            transition,
+            timeline_range,
+            [None, None],
+            br_map,
+        )
+        
+        effect_e = transition_e.find("./effect")
+        self.assertEqual(effect_e.find("./effectid").text, "Wipe")
+        
+        # Check that custom parameters are included
+        param_e = effect_e.find("./parameter")
+        self.assertIsNotNone(param_e)
+        self.assertEqual(param_e.find("./name").text, "Direction")
+    
+    def test_build_transition_item_fade_to_black(self):
+        """Test building fade to black transition"""
+        transition = schema.Transition(
+            name="Fade Out",
+            transition_type=schema.TransitionTypes.Custom_Fade,
+            in_offset=opentime.RationalTime(0, 24),
+            out_offset=opentime.RationalTime(30, 24),
+        )
+        
+        timeline_range = opentime.TimeRange(
+            start_time=opentime.RationalTime(500, 24),
+            duration=opentime.RationalTime(30, 24),
+        )
+        
+        br_map = {}
+        transition_e = self.adapter._build_transition_item(
+            transition,
+            timeline_range,
+            [None, None],
+            br_map,
+        )
+        
+        # Should be end-black since in_offset is 0
+        self.assertEqual(transition_e.find("./alignment").text, "end-black")
+        
+        effect_e = transition_e.find("./effect")
+        self.assertEqual(effect_e.find("./effectid").text, "Dip to Color Dissolve")
+    
+    def test_build_transition_item_fade_from_black(self):
+        """Test building fade from black transition"""
+        transition = schema.Transition(
+            name="Fade In",
+            transition_type=schema.TransitionTypes.Custom_Fade,
+            in_offset=opentime.RationalTime(30, 24),
+            out_offset=opentime.RationalTime(0, 24),
+        )
+        
+        timeline_range = opentime.TimeRange(
+            start_time=opentime.RationalTime(0, 24),
+            duration=opentime.RationalTime(30, 24),
+        )
+        
+        br_map = {}
+        transition_e = self.adapter._build_transition_item(
+            transition,
+            timeline_range,
+            [None, None],
+            br_map,
+        )
+        
+        # Should be start-black since out_offset is 0
+        self.assertEqual(transition_e.find("./alignment").text, "start-black")
+    
+    def test_roundtrip_transitions(self):
+        """Test full roundtrip of transitions: mem -> disk -> mem"""
+        timeline = schema.Timeline('test_timeline_transitions')
+        RATE = 24.0
+        
+        video_reference = schema.ExternalReference(
+            target_url="/var/tmp/test_video.mov",
+            available_range=opentime.TimeRange(
+                opentime.RationalTime(value=0, rate=RATE),
+                opentime.RationalTime(value=1000, rate=RATE)
+            )
+        )
+        video_reference.name = "test_video"
+        
+        v0 = schema.Track(kind=schema.TrackKind.Video)
+        timeline.tracks.append(v0)
+        
+        # Add clips with transitions between them
+        v0.extend([
+            schema.Clip(
+                name='clip1',
+                media_reference=video_reference,
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(value=0, rate=RATE),
+                    opentime.RationalTime(value=100, rate=RATE)
+                )
+            ),
+            schema.Transition(
+                name="Cross Dissolve",
+                transition_type=schema.TransitionTypes.SMPTE_Dissolve,
+                in_offset=opentime.RationalTime(12, RATE),
+                out_offset=opentime.RationalTime(12, RATE),
+            ),
+            schema.Clip(
+                name='clip2',
+                media_reference=video_reference,
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(value=100, rate=RATE),
+                    opentime.RationalTime(value=100, rate=RATE)
+                )
+            ),
+            schema.Transition(
+                name="Wipe",
+                transition_type=schema.TransitionTypes.Custom_Wipe,
+                in_offset=opentime.RationalTime(15, RATE),
+                out_offset=opentime.RationalTime(15, RATE),
+                metadata={
+                    "fcp_xml": {
+                        "effectid": "Wipe",
+                    }
+                }
+            ),
+            schema.Clip(
+                name='clip3',
+                media_reference=video_reference,
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(value=200, rate=RATE),
+                    opentime.RationalTime(value=100, rate=RATE)
+                )
+            ),
+        ])
+        
+        timeline.global_start_time = opentime.RationalTime(0, RATE)
+        
+        # Write to string
+        result = adapters.write_to_string(timeline, adapter_name='fcp_xml')
+        
+        # Read back
+        new_timeline = adapters.read_from_string(result, adapter_name='fcp_xml')
+        
+        # Verify structure
+        self.assertEqual(len(new_timeline.tracks), 1)
+        video_track = new_timeline.tracks[0]
+        
+        # Should have 5 items: clip, transition, clip, transition, clip
+        self.assertEqual(len(video_track), 5)
+        
+        # Check types
+        self.assertIsInstance(video_track[0], schema.Clip)
+        self.assertIsInstance(video_track[1], schema.Transition)
+        self.assertIsInstance(video_track[2], schema.Clip)
+        self.assertIsInstance(video_track[3], schema.Transition)
+        self.assertIsInstance(video_track[4], schema.Clip)
+        
+        # Check transition properties
+        transition1 = video_track[1]
+        self.assertEqual(transition1.name, "Cross Dissolve")
+        self.assertEqual(
+            transition1.transition_type,
+            schema.TransitionTypes.SMPTE_Dissolve
+        )
+        self.assertEqual(transition1.in_offset.value, 12)
+        self.assertEqual(transition1.out_offset.value, 12)
+        
+        transition2 = video_track[3]
+        self.assertEqual(transition2.name, "Wipe")
+        self.assertEqual(
+            transition2.transition_type,
+            schema.TransitionTypes.Custom_Wipe
+        )
+        self.assertEqual(transition2.in_offset.value, 15)
+        self.assertEqual(transition2.out_offset.value, 15)
+    
+    def test_audio_transition_mediatype(self):
+        """Test that audio transitions have correct mediatype"""
+        timeline = schema.Timeline('audio_transition_test')
+        RATE = 48000.0
+        
+        audio_reference = schema.ExternalReference(
+            target_url="/var/tmp/test_audio.wav",
+            available_range=opentime.TimeRange(
+                opentime.RationalTime(value=0, rate=RATE),
+                opentime.RationalTime(value=10000, rate=RATE)
+            )
+        )
+        audio_reference.name = "test_audio"
+        
+        a0 = schema.Track(kind=schema.TrackKind.Audio)
+        timeline.tracks.append(a0)
+        
+        a0.extend([
+            schema.Clip(
+                name='audio_clip1',
+                media_reference=audio_reference,
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(value=0, rate=RATE),
+                    opentime.RationalTime(value=5000, rate=RATE)
+                )
+            ),
+            schema.Transition(
+                name="Audio Crossfade",
+                transition_type=schema.TransitionTypes.SMPTE_Dissolve,
+                in_offset=opentime.RationalTime(240, RATE),
+                out_offset=opentime.RationalTime(240, RATE),
+            ),
+            schema.Clip(
+                name='audio_clip2',
+                media_reference=audio_reference,
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(value=5000, rate=RATE),
+                    opentime.RationalTime(value=5000, rate=RATE)
+                )
+            ),
+        ])
+        
+        timeline.global_start_time = opentime.RationalTime(0, RATE)
+        
+        # Write to XML string
+        xml_string = adapters.write_to_string(timeline, adapter_name='fcp_xml')
+        
+        # Parse the XML to verify mediatype
+        tree = cElementTree.fromstring(xml_string)
+        
+        # Find the transition element
+        transition_elem = tree.find(".//transitionitem")
+        self.assertIsNotNone(transition_elem)
+        
+        # Check that the mediatype is 'audio'
+        mediatype_elem = transition_elem.find("./effect/mediatype")
+        self.assertIsNotNone(mediatype_elem)
+        self.assertEqual(mediatype_elem.text, "audio")
+        
+        # Now read it back and verify
+        new_timeline = adapters.read_from_string(xml_string, adapter_name='fcp_xml')
+        audio_track = new_timeline.tracks[0]
+        
+        transition = audio_track[1]
+        self.assertIsInstance(transition, schema.Transition)
+        self.assertEqual(transition.name, "Audio Crossfade")
+    
+    def test_read_transitions_from_file(self):
+        """Test reading a file with various transitions"""
+        timeline = adapters.read_from_file(TRANSITIONS_EXAMPLE_PATH)
+        
+        # Should have 1 video track and 1 audio track
+        video_tracks = [t for t in timeline.tracks if t.kind == schema.TrackKind.Video]
+        audio_tracks = [t for t in timeline.tracks if t.kind == schema.TrackKind.Audio]
+        
+        self.assertEqual(len(video_tracks), 1)
+        self.assertEqual(len(audio_tracks), 1)
+        
+        video_track = video_tracks[0]
+        audio_track = audio_tracks[0]
+        
+        # Video track should have: clip, transition, clip, transition, clip (5 items)
+        self.assertEqual(len(video_track), 5)
+        
+        # Check video items
+        self.assertIsInstance(video_track[0], schema.Clip)
+        self.assertEqual(video_track[0].name, "clip_A.mov")
+        
+        self.assertIsInstance(video_track[1], schema.Transition)
+        self.assertEqual(video_track[1].name, "Cross Dissolve")
+        self.assertEqual(video_track[1].transition_type, schema.TransitionTypes.SMPTE_Dissolve)
+        
+        self.assertIsInstance(video_track[2], schema.Clip)
+        self.assertEqual(video_track[2].name, "clip_B.mov")
+        
+        self.assertIsInstance(video_track[3], schema.Transition)
+        self.assertEqual(video_track[3].name, "Wipe Right")
+        self.assertEqual(video_track[3].transition_type, schema.TransitionTypes.Custom_Wipe)
+        
+        self.assertIsInstance(video_track[4], schema.Clip)
+        self.assertEqual(video_track[4].name, "clip_C.mov")
+        
+        # Check audio track has transition
+        self.assertEqual(len(audio_track), 3)
+        self.assertIsInstance(audio_track[0], schema.Clip)
+        self.assertIsInstance(audio_track[1], schema.Transition)
+        self.assertIsInstance(audio_track[2], schema.Clip)
+        
+        audio_transition = audio_track[1]
+        self.assertEqual(audio_transition.name, "Audio Crossfade")
+        
+        # Verify audio transition has audio mediatype in metadata
+        self.assertIn("fcp_xml", audio_transition.metadata)
+        effect_meta = audio_transition.metadata["fcp_xml"].get("effect", {})
+        self.assertEqual(effect_meta.get("mediatype"), "audio")
 
 
 if __name__ == '__main__':

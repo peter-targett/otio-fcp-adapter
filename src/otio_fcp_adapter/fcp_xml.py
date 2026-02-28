@@ -295,6 +295,61 @@ def _transition_cut_point(transition_item, context):
     return opentime.RationalTime(value, rate)
 
 
+def _is_audio_transition(transition_element):
+    """
+    Determines if a transition is an audio transition based on its effect.
+    
+    :param transition_element: The XML transition element.
+    :return: True if this is an audio transition, False otherwise.
+    """
+    effect_element = transition_element.find('./effect')
+    if effect_element is None:
+        return False
+    
+    mediatype_element = effect_element.find('./mediatype')
+    if mediatype_element is not None:
+        return mediatype_element.text.lower() == 'audio'
+    
+    # Fallback: check effect ID for common audio transition names
+    effectid_element = effect_element.find('./effectid')
+    if effectid_element is not None:
+        effectid = effectid_element.text.lower()
+        audio_keywords = ['audio', 'crossfade', 'fade in', 'fade out']
+        return any(keyword in effectid for keyword in audio_keywords)
+    
+    return False
+
+
+def _transition_cut_point(transition_item, context):
+    """
+    Returns the end time at which the transition progresses from one clip to
+    the next.
+
+    :param transition_item: The XML element for the transition.
+    :param context: The context dictionary applying to this transition.
+
+    :return: The :class: `opentime.RationalTime` the transition cuts at.
+    """
+    alignment = transition_item.find('./alignment').text
+    start = int(transition_item.find('./start').text)
+    end = int(transition_item.find('./end').text)
+
+    # start/end time is in the parent context's rate
+    local_context = context.context_pushing_element(transition_item)
+    rate = _rate_from_context(local_context)
+
+    if alignment in ('end', 'end-black'):
+        value = end
+    elif alignment in ('start', 'start-black'):
+        value = start
+    elif alignment in ('center',):
+        value = int((start + end) / 2)
+    else:
+        value = int((start + end) / 2)
+
+    return opentime.RationalTime(value, rate)
+
+
 def _xml_tree_to_dict(node, ignore_tags=None, omit_timing=True):
     """
     Translates the tree under a provided node mapping to a dictionary/list
@@ -1134,11 +1189,37 @@ class FCP7XMLParser:
         )
         cut_point = _transition_cut_point(item_element, context)
 
+        # Determine transition type from effect metadata
+        effect_element = item_element.find('./effect')
+        effect_id = effect_element.find('./effectid')
+        
+        transition_type = schema.TransitionTypes.SMPTE_Dissolve
+        if effect_id is not None:
+            effect_id_text = effect_id.text.lower()
+            if 'wipe' in effect_id_text:
+                transition_type = schema.TransitionTypes.Custom_Wipe
+            elif 'dip' in effect_id_text or 'fade' in effect_id_text:
+                transition_type = schema.TransitionTypes.Custom_Fade
+            # Add more mappings as needed
+        
+        # Parse metadata for roundtripping
+        metadata_ignore_keys = {
+            "name", "start", "end", "alignment", "rate", "effect"
+        }
+        md_dict = _xml_tree_to_dict(item_element, metadata_ignore_keys)
+        
+        # Store effect metadata separately
+        if effect_element is not None:
+            effect_md = _xml_tree_to_dict(effect_element, {"name", "effectid"})
+            if effect_md:
+                md_dict["effect"] = effect_md
+
         transition = schema.Transition(
-            name=_name_from_element(item_element.find('./effect')),
-            transition_type=schema.TransitionTypes.SMPTE_Dissolve,
+            name=_name_from_element(effect_element),
+            transition_type=transition_type,
             in_offset=cut_point - start,
             out_offset=end - cut_point,
+            metadata=({META_NAMESPACE: md_dict} if md_dict else None)
         )
 
         return transition
@@ -1580,16 +1661,48 @@ def _build_transition_item(
 
     # Only add an effect if it didn't already come in from the metadata dict
     if not transition_e.find("./effect"):
+        # Try to get effect metadata if it was preserved from read
         try:
-            effectid = transition_item.metadata[META_NAMESPACE]["effectid"]
-        except KeyError:
-            effectid = "Cross Dissolve"
+            effect_metadata = transition_item.metadata[META_NAMESPACE].get("effect", {})
+        except (KeyError, AttributeError):
+            effect_metadata = {}
+        
+        # Determine effect ID based on transition type or metadata
+        effectid = effect_metadata.get("effectid")
+        if effectid is None:
+            try:
+                effectid = transition_item.metadata[META_NAMESPACE]["effectid"]
+            except (KeyError, AttributeError):
+                # Map OTIO transition types to FCP effect IDs
+                type_to_effectid = {
+                    schema.TransitionTypes.SMPTE_Dissolve: "Cross Dissolve",
+                    schema.TransitionTypes.Custom_Fade: "Dip to Color Dissolve",
+                    schema.TransitionTypes.Custom_Wipe: "Wipe",
+                }
+                effectid = type_to_effectid.get(
+                    transition_item.transition_type,
+                    "Cross Dissolve"
+                )
 
         effect_e = _append_new_sub_element(transition_e, 'effect')
         _append_new_sub_element(effect_e, 'name', text=transition_item.name)
         _append_new_sub_element(effect_e, 'effectid', text=effectid)
-        _append_new_sub_element(effect_e, 'effecttype', text='transition')
-        _append_new_sub_element(effect_e, 'mediatype', text='video')
+        
+        # Add other effect properties from metadata if available
+        effecttype = effect_metadata.get("effecttype", "transition")
+        mediatype = effect_metadata.get("mediatype", "video")
+        
+        _append_new_sub_element(effect_e, 'effecttype', text=effecttype)
+        _append_new_sub_element(effect_e, 'mediatype', text=mediatype)
+        
+        # Add any additional effect parameters from metadata
+        for key, value in effect_metadata.items():
+            if key not in {"effectid", "effecttype", "mediatype", "name"}:
+                if isinstance(value, dict):
+                    param_e = _dict_to_xml_tree(value, key)
+                    effect_e.append(param_e)
+                else:
+                    _append_new_sub_element(effect_e, key, text=str(value))
 
     return transition_e
 
@@ -1845,9 +1958,19 @@ def _build_top_level_track(track, track_rate, br_map):
             timeline_range.start_time.rescaled_to(track_rate),
             timeline_range.duration.rescaled_to(track_rate)
         )
-        track_e.append(
-            _build_item(item, timeline_range, transition_offsets, br_map)
-        )
+        
+        # Build the item with track kind context for proper transition handling
+        item_element = _build_item(item, timeline_range, transition_offsets, br_map)
+        
+        # For audio tracks, ensure audio transitions have correct mediatype
+        if track.kind == schema.TrackKind.Audio and isinstance(item, schema.Transition):
+            effect_element = item_element.find('./effect')
+            if effect_element is not None:
+                mediatype_elem = effect_element.find('./mediatype')
+                if mediatype_elem is not None:
+                    mediatype_elem.text = 'audio'
+        
+        track_e.append(item_element)
 
     return track_e
 
