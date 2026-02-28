@@ -974,7 +974,8 @@ class TestFcp7XmlElements(unittest.TestCase, test_utils.OTIOAssertions):
         parser = self.adapter.FCP7XMLParser(wipe_element)
         transition = parser.transition_for_element(wipe_element, context)
         
-        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom_Wipe)
+        # Wipe transitions should be Custom type (not SMPTE_Dissolve)
+        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom)
         self.assertEqual(transition.name, "Wipe Right")
     
     def test_transition_fade_type_detection(self):
@@ -1006,7 +1007,8 @@ class TestFcp7XmlElements(unittest.TestCase, test_utils.OTIOAssertions):
         parser = self.adapter.FCP7XMLParser(fade_element)
         transition = parser.transition_for_element(fade_element, context)
         
-        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom_Fade)
+        # Fade/Dip transitions should be Custom type (not SMPTE_Dissolve)
+        self.assertEqual(transition.transition_type, schema.TransitionTypes.Custom)
         self.assertEqual(transition.name, "Fade In")
     
     def test_audio_transition_detection(self):
@@ -1662,7 +1664,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         """Test building wipe transition with metadata"""
         transition = schema.Transition(
             name="Wipe Right",
-            transition_type=schema.TransitionTypes.Custom_Wipe,
+            transition_type=schema.TransitionTypes.Custom,
             in_offset=opentime.RationalTime(20, 24),
             out_offset=opentime.RationalTime(20, 24),
             metadata={
@@ -1703,7 +1705,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         """Test building fade to black transition"""
         transition = schema.Transition(
             name="Fade Out",
-            transition_type=schema.TransitionTypes.Custom_Fade,
+            transition_type=schema.TransitionTypes.Custom,
             in_offset=opentime.RationalTime(0, 24),
             out_offset=opentime.RationalTime(30, 24),
         )
@@ -1725,13 +1727,14 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         self.assertEqual(transition_e.find("./alignment").text, "end-black")
         
         effect_e = transition_e.find("./effect")
-        self.assertEqual(effect_e.find("./effectid").text, "Dip to Color Dissolve")
+        # Custom transitions default to Custom Transition effectid
+        self.assertEqual(effect_e.find("./effectid").text, "Custom")
     
     def test_build_transition_item_fade_from_black(self):
         """Test building fade from black transition"""
         transition = schema.Transition(
             name="Fade In",
-            transition_type=schema.TransitionTypes.Custom_Fade,
+            transition_type=schema.TransitionTypes.Custom,
             in_offset=opentime.RationalTime(30, 24),
             out_offset=opentime.RationalTime(0, 24),
         )
@@ -1795,7 +1798,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
             ),
             schema.Transition(
                 name="Wipe",
-                transition_type=schema.TransitionTypes.Custom_Wipe,
+                transition_type=schema.TransitionTypes.Custom,
                 in_offset=opentime.RationalTime(15, RATE),
                 out_offset=opentime.RationalTime(15, RATE),
                 metadata={
@@ -1850,7 +1853,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         self.assertEqual(transition2.name, "Wipe")
         self.assertEqual(
             transition2.transition_type,
-            schema.TransitionTypes.Custom_Wipe
+            schema.TransitionTypes.Custom
         )
         self.assertEqual(transition2.in_offset.value, 15)
         self.assertEqual(transition2.out_offset.value, 15)
@@ -1952,18 +1955,20 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         
         self.assertIsInstance(video_track[3], schema.Transition)
         self.assertEqual(video_track[3].name, "Wipe Right")
-        self.assertEqual(video_track[3].transition_type, schema.TransitionTypes.Custom_Wipe)
+        self.assertEqual(video_track[3].transition_type, schema.TransitionTypes.Custom)
         
         self.assertIsInstance(video_track[4], schema.Clip)
         self.assertEqual(video_track[4].name, "clip_C.mov")
-        
+
         # Check audio track has transition
-        self.assertEqual(len(audio_track), 3)
+        # Audio track has: Clip, Gap, Transition, Clip (4 items)
+        self.assertEqual(len(audio_track), 4)
         self.assertIsInstance(audio_track[0], schema.Clip)
-        self.assertIsInstance(audio_track[1], schema.Transition)
-        self.assertIsInstance(audio_track[2], schema.Clip)
+        self.assertIsInstance(audio_track[1], schema.Gap)
+        self.assertIsInstance(audio_track[2], schema.Transition)
+        self.assertIsInstance(audio_track[3], schema.Clip)
         
-        audio_transition = audio_track[1]
+        audio_transition = audio_track[2]  # Transition is at index 2 (after Clip and Gap)
         self.assertEqual(audio_transition.name, "Audio Crossfade")
         
         # Verify audio transition has audio mediatype in metadata

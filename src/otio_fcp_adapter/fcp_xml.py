@@ -1196,15 +1196,15 @@ class FCP7XMLParser:
         transition_type = schema.TransitionTypes.SMPTE_Dissolve
         if effect_id is not None:
             effect_id_text = effect_id.text.lower()
-            if 'wipe' in effect_id_text:
-                transition_type = schema.TransitionTypes.Custom_Wipe
-            elif 'dip' in effect_id_text or 'fade' in effect_id_text:
-                transition_type = schema.TransitionTypes.Custom_Fade
+            # Use Custom for non-dissolve transitions
+            if 'wipe' in effect_id_text or 'dip' in effect_id_text or 'fade' in effect_id_text:
+                transition_type = schema.TransitionTypes.Custom
             # Add more mappings as needed
         
         # Parse metadata for roundtripping
+        # Don't ignore alignment - it's needed for proper roundtripping
         metadata_ignore_keys = {
-            "name", "start", "end", "alignment", "rate", "effect"
+            "name", "start", "end", "rate", "effect"
         }
         md_dict = _xml_tree_to_dict(item_element, metadata_ignore_keys)
         
@@ -1429,6 +1429,12 @@ def _build_timecode(time, fps, drop_frame=False, additional_metadata=None):
     else:
         tc_element = cElementTree.Element("timecode")
 
+    # If fps appears to be an audio sample rate (> 300), use a standard video rate
+    # FCP XML requires timecode, which only works with video framerates
+    if fps > 300:
+        # Use 24fps as a default for audio-only content
+        fps = 24.0
+
     tc_element.append(_build_rate(fps))
     rate_is_not_ntsc = (tc_element.find('./rate/ntsc').text == "FALSE")
     if drop_frame and rate_is_not_ntsc:
@@ -1602,11 +1608,18 @@ def _build_file(media_reference, br_map):
     )
     file_e.append(tc_element)
 
-    # we need to flag the file reference with the content types, otherwise it
-    # will not get recognized
-    # TODO: We should use a better method for this. Perhaps pre-walk the
-    #       timeline and find all the track kinds this media is present in?
-    if file_e.find("media") is not None:
+    # Handle media element - preserve detailed structure from metadata if present
+    existing_media = file_e.find("media")
+    
+    if existing_media is not None:
+        # We have media metadata - keep it and ensure video/audio children exist
+        file_media_e = existing_media
+    else:
+        # No media metadata - create a fresh media element
+        # we need to flag the file reference with the content types, otherwise it
+        # will not get recognized
+        # TODO: We should use a better method for this. Perhaps pre-walk the
+        #       timeline and find all the track kinds this media is present in?
         file_media_e = _get_or_create_subelement(file_e, "media")
 
         has_video = False
@@ -1650,17 +1663,21 @@ def _build_transition_item(
         # default center aligned
         alignment = "center"
         if not transition_item.in_offset.value:
-            alignment = 'start-black'
-        elif not transition_item.out_offset.value:
+            # in_offset is 0: transition starts with black (fade to black at end)
             alignment = 'end-black'
+        elif not transition_item.out_offset.value:
+            # out_offset is 0: transition ends with black (fade from black at start)
+            alignment = 'start-black'
 
         _append_new_sub_element(transition_e, 'alignment', text=alignment)
         # todo support 'start' and 'end' alignment
 
     transition_e.append(_build_rate(timeline_range.start_time.rate))
 
-    # Only add an effect if it didn't already come in from the metadata dict
-    if transition_e.find("./effect") is not None:
+    # Check if effect came from metadata, but we still need to populate name/effectid
+    effect_from_metadata = transition_e.find("./effect")
+
+    if effect_from_metadata is None:
         # Try to get effect metadata if it was preserved from read
         try:
             effect_metadata = transition_item.metadata[META_NAMESPACE].get("effect", {})
@@ -1674,15 +1691,12 @@ def _build_transition_item(
                 effectid = transition_item.metadata[META_NAMESPACE]["effectid"]
             except (KeyError, AttributeError):
                 # Map OTIO transition types to FCP effect IDs
-                type_to_effectid = {
-                    schema.TransitionTypes.SMPTE_Dissolve: "Cross Dissolve",
-                    schema.TransitionTypes.Custom_Fade: "Dip to Color Dissolve",
-                    schema.TransitionTypes.Custom_Wipe: "Wipe",
-                }
-                effectid = type_to_effectid.get(
-                    transition_item.transition_type,
-                    "Cross Dissolve"
-                )
+                # Note: OTIO only has SMPTE_Dissolve and Custom types
+                if transition_item.transition_type == schema.TransitionTypes.SMPTE_Dissolve:
+                    effectid = "Cross Dissolve"
+                else:
+                    # For Custom transitions, use a generic effect
+                    effectid = "Custom"
 
         effect_e = _append_new_sub_element(transition_e, 'effect')
         _append_new_sub_element(effect_e, 'name', text=transition_item.name)
@@ -1703,6 +1717,48 @@ def _build_transition_item(
                     effect_e.append(param_e)
                 else:
                     _append_new_sub_element(effect_e, key, text=str(value))
+    else:
+        # Effect came from metadata dict, but name and effectid were excluded
+        # during read, so we need to add them back
+        effect_e = effect_from_metadata
+
+        # Ensure name element exists and is populated from transition name
+        name_e = effect_e.find("./name")
+        if name_e is None:
+            # Insert name as first child for consistency
+            name_e = cElementTree.Element("name")
+            name_e.text = transition_item.name
+            effect_e.insert(0, name_e)
+        elif not name_e.text or name_e.text == "":
+            name_e.text = transition_item.name
+
+        # Ensure effectid exists
+        effectid_e = effect_e.find("./effectid")
+        if effectid_e is None or not effectid_e.text:
+            # Try to get from original metadata first
+            try:
+                effectid_from_meta = transition_item.metadata[META_NAMESPACE].get("effectid")
+            except (KeyError, AttributeError):
+                effectid_from_meta = None
+
+            if effectid_from_meta:
+                effectid = effectid_from_meta
+            else:
+                # Map from transition type
+                if transition_item.transition_type == schema.TransitionTypes.SMPTE_Dissolve:
+                    effectid = "Cross Dissolve"
+                else:
+                    effectid = "Custom"
+
+            if effectid_e is None:
+                # Insert after name for consistency
+                effectid_e = cElementTree.Element("effectid")
+                effectid_e.text = effectid
+                # Find position after name
+                name_index = list(effect_e).index(name_e) if name_e in effect_e else 0
+                effect_e.insert(name_index + 1, effectid_e)
+            else:
+                effectid_e.text = effectid
 
     return transition_e
 
