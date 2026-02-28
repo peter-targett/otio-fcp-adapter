@@ -1606,7 +1606,7 @@ def _build_file(media_reference, br_map):
     # will not get recognized
     # TODO: We should use a better method for this. Perhaps pre-walk the
     #       timeline and find all the track kinds this media is present in?
-    if not file_e.find("media"):
+    if file_e.find("media") is not None:
         file_media_e = _get_or_create_subelement(file_e, "media")
 
         has_video = False
@@ -1660,7 +1660,7 @@ def _build_transition_item(
     transition_e.append(_build_rate(timeline_range.start_time.rate))
 
     # Only add an effect if it didn't already come in from the metadata dict
-    if not transition_e.find("./effect"):
+    if transition_e.find("./effect") is not None:
         # Try to get effect metadata if it was preserved from read
         try:
             effect_metadata = transition_item.metadata[META_NAMESPACE].get("effect", {})
