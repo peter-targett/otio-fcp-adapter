@@ -1727,8 +1727,8 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         self.assertEqual(transition_e.find("./alignment").text, "end-black")
         
         effect_e = transition_e.find("./effect")
-        # Custom transitions default to Custom Transition effectid
-        self.assertEqual(effect_e.find("./effectid").text, "Custom")
+        # Custom transitions default to Cross Dissolve effectid
+        self.assertEqual(effect_e.find("./effectid").text, "Cross Dissolve")
     
     def test_build_transition_item_fade_from_black(self):
         """Test building fade from black transition"""
