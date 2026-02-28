@@ -1470,12 +1470,22 @@ def _build_item_timings(
     # source_start is absolute time taking into account the timecode of the
     # media. But xml regards the source in point from the start of the media.
     # So we subtract the media timecode.
-    item_rate = item.source_range.start_time.rate
-    source_start = (item.source_range.start_time - timecode)
-    source_start = source_start.rescaled_to(item_rate)
+    
+    # Handle case where item doesn't have a source_range (shouldn't happen for clips, but defensive)
+    if item.source_range is None:
+        # Fall back to using timeline_range
+        item_rate = timeline_range.start_time.rate
+        source_start = timeline_range.start_time - timecode
+        source_start = source_start.rescaled_to(item_rate)
+        source_end = timeline_range.end_time_exclusive() - timecode
+        source_end = source_end.rescaled_to(item_rate)
+    else:
+        item_rate = item.source_range.start_time.rate
+        source_start = (item.source_range.start_time - timecode)
+        source_start = source_start.rescaled_to(item_rate)
 
-    source_end = (item.source_range.end_time_exclusive() - timecode)
-    source_end = source_end.rescaled_to(item_rate)
+        source_end = (item.source_range.end_time_exclusive() - timecode)
+        source_end = source_end.rescaled_to(item_rate)
 
     start = f'{timeline_range.start_time.value:.0f}'
     end = f'{timeline_range.end_time_exclusive().value:.0f}'
@@ -1489,9 +1499,11 @@ def _build_item_timings(
         end = '-1'
         source_end += transition_offsets[1]
 
+    # Use source_range duration if available, otherwise use timeline_range duration
+    duration_value = item.source_range.duration if item.source_range else timeline_range.duration
     _append_new_sub_element(
         item_e, 'duration',
-        text=f'{item.source_range.duration.value:.0f}'
+        text=f'{duration_value.value:.0f}'
     )
     _append_new_sub_element(item_e, 'start', text=start)
     _append_new_sub_element(item_e, 'end', text=end)
@@ -1612,8 +1624,9 @@ def _build_file(media_reference, br_map):
     existing_media = file_e.find("media")
     
     if existing_media is not None:
-        # We have media metadata - keep it and ensure video/audio children exist
-        file_media_e = existing_media
+        # We have media metadata - keep it as-is (it has detailed info like samplecharacteristics)
+        # Don't modify it to preserve all the metadata from roundtrip
+        pass
     else:
         # No media metadata - create a fresh media element
         # we need to flag the file reference with the content types, otherwise it
@@ -1696,7 +1709,7 @@ def _build_transition_item(
                     effectid = "Cross Dissolve"
                 else:
                     # For Custom transitions, use a generic effect
-                    effectid = "Custom"
+                    effectid = "Cross Dissolve"
 
         effect_e = _append_new_sub_element(transition_e, 'effect')
         _append_new_sub_element(effect_e, 'name', text=transition_item.name)
@@ -1748,7 +1761,7 @@ def _build_transition_item(
                 if transition_item.transition_type == schema.TransitionTypes.SMPTE_Dissolve:
                     effectid = "Cross Dissolve"
                 else:
-                    effectid = "Custom"
+                    effectid = "Cross Dissolve"
 
             if effectid_e is None:
                 # Insert after name for consistency
@@ -1854,18 +1867,21 @@ def _build_clip_item(clip_item, timeline_range, transition_offsets, br_map):
 
     _append_new_sub_element(clip_item_e, 'name', text=name)
 
+    # Determine the rate to use - prefer source_range if available, fall back to timeline_range
+    if clip_item.source_range is not None:
+        item_rate = clip_item.source_range.start_time.rate
+    else:
+        item_rate = timeline_range.start_time.rate
+
     if clip_item.media_reference.available_range:
-        clip_item_e.append(
-            _build_rate(clip_item.source_range.start_time.rate)
-        )
+        clip_item_e.append(_build_rate(item_rate))
     clip_item_e.extend(_build_marker(m) for m in clip_item.markers)
 
+    # Determine timecode
     if clip_item.media_reference.available_range:
         timecode = clip_item.media_reference.available_range.start_time
     else:
-        timecode = opentime.RationalTime(
-            0, clip_item.source_range.start_time.rate
-        )
+        timecode = opentime.RationalTime(0, item_rate)
 
     _build_item_timings(
         clip_item_e,
