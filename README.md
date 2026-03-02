@@ -20,7 +20,7 @@ The following features of OTIO are supported by the `fcp_xml` adapter:
 |Gap/Filler               | ✔       |
 |Markers                  | ✔       |
 |Nesting                  | ✔       |
-|Transitions              | ✖       |
+|Transitions              | ✔       |
 |Audio/Video Effects      | ✖       |
 |Linear Speed Effects     | ✖       |
 |Fancy Speed Effects      | ✖       |
