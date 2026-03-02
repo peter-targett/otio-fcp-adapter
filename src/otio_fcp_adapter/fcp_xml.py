@@ -118,6 +118,64 @@ def _url_to_path(url):
     return parsed.path
 
 
+def _parse_image_sequence_url(url):
+    """
+    Parse an image sequence URL pattern and extract components.
+    
+    Detects patterns like:
+    - file:///path/to/image.%04d.exr
+    - file:///path/to/image.%08d.dpx
+    
+    :param url: The URL string potentially containing an image sequence pattern.
+    :return: A dictionary with image sequence components, or None if not an image sequence.
+    """
+    if not url:
+        return None
+    
+    # Check for printf-style pattern like %04d, %08d, etc.
+    # Note: We need to be careful because % is also used for URL encoding
+    # We look specifically for %0Nd or %d patterns (where N is a digit)
+    pattern_match = re.search(r'%0?(\d+)d', url)
+    if not pattern_match:
+        return None
+    
+    # Extract zero padding
+    frame_zero_padding = int(pattern_match.group(1))
+    frame_pattern = pattern_match.group(0)  # e.g., "%04d"
+    
+    # Get the full path
+    full_path = _url_to_path(url)
+    
+    # Split into directory and filename
+    directory = os.path.dirname(full_path)
+    filename = os.path.basename(full_path)
+    
+    # URL-decode the filename, but we need to preserve the frame pattern
+    # First, replace the frame pattern with a placeholder
+    placeholder = "<<<FRAME_PATTERN>>>"
+    filename_with_placeholder = filename.replace(frame_pattern, placeholder)
+    
+    # Now URL-decode
+    filename_decoded = urllib_parse.unquote(filename_with_placeholder)
+    
+    # Split on the placeholder to get prefix and suffix
+    parts = filename_decoded.split(placeholder)
+    if len(parts) == 2:
+        name_prefix = parts[0]
+        name_suffix = parts[1]
+    else:
+        # Pattern might be at the beginning or end
+        name_prefix = parts[0] if parts[0] else ""
+        name_suffix = parts[-1] if len(parts) > 1 else ""
+    
+    return {
+        'target_url_base': directory,
+        'name_prefix': name_prefix,
+        'name_suffix': name_suffix,
+        'frame_zero_padding': frame_zero_padding,
+    }
+
+
 def _bool_value(element):
     """
     Given an xml element, returns the tag text converted to a bool.
@@ -921,12 +979,34 @@ class FCP7XMLParser:
             available_range = None
 
         if path is not None:
-            media_reference = schema.ExternalReference(
-                target_url=path,
-                available_range=available_range,
-                metadata=metadata_dict,
-            )
-            media_reference.name = name
+            # Check if this is an image sequence
+            img_seq_info = _parse_image_sequence_url(path)
+            
+            if img_seq_info is not None:
+                # Create ImageSequenceReference
+                # Calculate start_frame from the timecode
+                start_frame = int(start_time.value) if start_time else 0
+                
+                media_reference = schema.ImageSequenceReference(
+                    target_url_base=img_seq_info['target_url_base'],
+                    name_prefix=img_seq_info['name_prefix'],
+                    name_suffix=img_seq_info['name_suffix'],
+                    start_frame=start_frame,
+                    frame_step=1,
+                    rate=media_ref_rate,
+                    frame_zero_padding=img_seq_info['frame_zero_padding'],
+                    available_range=available_range,
+                    metadata=metadata_dict,
+                )
+                media_reference.name = name
+            else:
+                # Regular external reference
+                media_reference = schema.ExternalReference(
+                    target_url=path,
+                    available_range=available_range,
+                    metadata=metadata_dict,
+                )
+                media_reference.name = name
         elif mediasource is not None:
             media_reference = schema.GeneratorReference(
                 name=name,

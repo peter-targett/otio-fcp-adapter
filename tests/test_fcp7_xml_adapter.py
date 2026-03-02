@@ -1619,11 +1619,47 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         self.assertEqual(timeline.audio_tracks()[1].name, "")
 
     def test_img_seq_media_references(self):
+        # Load OTIO file with ImageSequenceReference
         timeline = adapters.read_from_file(OTIO_IMG_SEQ_MEDIA_REFERENCE_PATH)
+        
+        # Verify the original has an ImageSequenceReference
+        clip = timeline.tracks[0][0]
+        self.assertIsInstance(
+            clip.media_reference, schema.ImageSequenceReference
+        )
+        
+        # Store original properties
+        orig_ref = clip.media_reference
+        self.assertEqual(orig_ref.target_url_base, "/tmp")
+        self.assertEqual(orig_ref.name_prefix, "PREGRADE MIXDOWN.")
+        self.assertEqual(orig_ref.name_suffix, ".exr")
+        self.assertEqual(orig_ref.start_frame, 125)
+        self.assertEqual(orig_ref.frame_zero_padding, 0)
+        
+        # Write to XML
         tmp_path = tempfile.mkstemp(suffix=".xml", text=True)[1]
-
-        # OTIO -> tempfile.xml
         adapters.write_to_file(timeline, tmp_path)
+        
+        # Read back from XML
+        roundtrip_timeline = adapters.read_from_file(tmp_path)
+        roundtrip_clip = roundtrip_timeline.tracks[0][0]
+        
+        # Verify it's still an ImageSequenceReference
+        self.assertIsInstance(
+            roundtrip_clip.media_reference, schema.ImageSequenceReference
+        )
+        
+        # Verify properties match
+        roundtrip_ref = roundtrip_clip.media_reference
+        self.assertEqual(roundtrip_ref.target_url_base, orig_ref.target_url_base)
+        self.assertEqual(roundtrip_ref.name_prefix, orig_ref.name_prefix)
+        self.assertEqual(roundtrip_ref.name_suffix, orig_ref.name_suffix)
+        self.assertEqual(roundtrip_ref.start_frame, orig_ref.start_frame)
+        self.assertEqual(roundtrip_ref.frame_zero_padding, orig_ref.frame_zero_padding)
+        self.assertEqual(roundtrip_ref.rate, orig_ref.rate)
+        
+        # Clean up
+        os.unlink(tmp_path)
     
     def test_build_transition_item(self):
         """Test building transition XML from OTIO transition objects"""
