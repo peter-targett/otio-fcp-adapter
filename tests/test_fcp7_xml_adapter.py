@@ -1303,6 +1303,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
                 marked_range=opentime.TimeRange(
                     opentime.RationalTime(123, RATE)
                 ),
+                comment='my_comment',
                 metadata={'fcp_xml': {'comment': 'my_comment'}}
             )
         )
@@ -1314,6 +1315,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
                     opentime.RationalTime(123, RATE),
                     opentime.RationalTime(11, RATE),
                 ),
+                comment='my_comment',
                 metadata={'fcp_xml': {'comment': 'my_comment'}}
             )
         )
@@ -1324,6 +1326,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
                 marked_range=opentime.TimeRange(
                     opentime.RationalTime(125, RATE)
                 ),
+                comment='my_comment',
                 metadata={'fcp_xml': {'comment': 'my_comment'}}
             )
         )
@@ -1335,6 +1338,7 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
                     opentime.RationalTime(125, RATE),
                     opentime.RationalTime(6, RATE)
                 ),
+                comment='my_comment',
                 metadata={'fcp_xml': {'comment': 'my_comment'}}
             )
         )
@@ -1377,6 +1381,64 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
                 pass
 
         self.assertJsonEqual(new_timeline, timeline)
+
+    def test_marker_comment_survives_roundtrip(self):
+        # A Marker built by hand (rather than read from XML) keeps its note in
+        # the first class comment field, so that has to reach <comment>.
+        RATE = 25.0
+
+        timeline = schema.Timeline("marked_timeline")
+        track = schema.Track(kind=schema.TrackKind.Video)
+        timeline.tracks.append(track)
+        track.append(
+            schema.Clip(
+                name="test_clip",
+                media_reference=schema.ExternalReference(
+                    target_url="/var/tmp/test1.mov",
+                    available_range=opentime.TimeRange(
+                        opentime.RationalTime(0, RATE),
+                        opentime.RationalTime(200, RATE),
+                    ),
+                ),
+                source_range=opentime.TimeRange(
+                    opentime.RationalTime(10, RATE),
+                    opentime.RationalTime(100, RATE),
+                ),
+            )
+        )
+        timeline.tracks.markers.append(
+            schema.Marker(
+                name="a_mark",
+                marked_range=opentime.TimeRange(
+                    opentime.RationalTime(30, RATE)
+                ),
+                comment="a note",
+            )
+        )
+
+        result = adapters.write_to_string(timeline, adapter_name="fcp_xml")
+
+        sequence_e = cElementTree.fromstring(result).find(".//sequence")
+        marker_e = sequence_e.find("./marker")
+        self.assertIsNotNone(marker_e)
+        self.assertEqual(marker_e.find("./comment").text, "a note")
+        self.assertEqual(marker_e.find("./in").text, "30")
+        # A marker with no duration has no out point, which FCP XML spells -1.
+        self.assertEqual(marker_e.find("./out").text, "-1")
+
+        new_timeline = adapters.read_from_string(
+            result, adapter_name="fcp_xml"
+        )
+        restored = list(new_timeline.tracks.markers)
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].comment, "a note")
+        self.assertEqual(
+            restored[0].marked_range,
+            opentime.TimeRange(
+                opentime.RationalTime(30, RATE),
+                opentime.RationalTime(0, RATE),
+            ),
+        )
 
     def test_roundtrip_disk2mem2disk(self):
         # somefile.xml -> OTIO
