@@ -513,11 +513,19 @@ def marker_for_element(marker_element, rate):
     md_dict = _xml_tree_to_dict(marker_element, {"in", "out", "name"})
     metadata = {META_NAMESPACE: md_dict} if md_dict else None
 
-    return schema.Marker(
+    marker = schema.Marker(
         name=_name_from_element(marker_element),
         marked_range=marker_range,
         metadata=metadata
     )
+
+    # Marker has a first class comment, so populate it as well as leaving
+    # the note in the metadata (which is what round-trips it back out).
+    comment_element = marker_element.find("./comment")
+    if comment_element is not None and comment_element.text:
+        marker.comment = comment_element.text
+
+    return marker
 
 
 def markers_from_element(element, context=None):
@@ -1861,17 +1869,25 @@ def _build_marker(marker):
 
     marked_range = marker.marked_range
 
+    # A marker read from XML keeps its comment in the metadata, so only add
+    # one here if the metadata didn't already provide it.
+    if marker.comment and marker_e.find("./comment") is None:
+        _append_new_sub_element(marker_e, 'comment', text=marker.comment)
+
     _append_new_sub_element(marker_e, 'name', text=marker.name)
     _append_new_sub_element(
         marker_e, 'in',
         text=f'{marked_range.start_time.value:.0f}'
     )
-    _append_new_sub_element(
-        marker_e, 'out',
-        text='{:.0f}'.format(
+    # FCP XML spells "this marker has no out point" as -1, which is what
+    # marker_for_element() above expects to read back.
+    if marked_range.duration.value > 0:
+        out_text = '{:.0f}'.format(
             marked_range.start_time.value + marked_range.duration.value
         )
-    )
+    else:
+        out_text = '-1'
+    _append_new_sub_element(marker_e, 'out', text=out_text)
 
     return marker_e
 
