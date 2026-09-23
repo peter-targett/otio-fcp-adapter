@@ -978,6 +978,7 @@ class FCP7XMLParser:
             "file",
             "marker",
             "effect",
+            "filter",
             "rate",
             "sequence",
         }
@@ -1642,6 +1643,8 @@ def _build_clip_item_without_media(
         media_start_time,
     )
 
+    clip_item_e.extend(_build_filters(clip_item))
+
     return clip_item_e
 
 
@@ -1717,6 +1720,8 @@ def _build_clip_item(clip_item, timeline_range, transition_offsets, br_map):
         transition_offsets,
         timecode
     )
+
+    clip_item_e.extend(_build_filters(clip_item))
 
     return clip_item_e
 
@@ -1862,6 +1867,85 @@ def _build_top_level_track(track, track_rate, br_map):
         )
 
     return track_e
+
+
+def _build_time_remap_effect(effect):
+    """
+    Builds the FCP XML "Time Remap" effect for a :class: `schema.LinearTimeWarp`.
+
+    FCP splits a linear retime into a positive percentage plus a separate
+    reverse flag, rather than carrying a signed rate the way OTIO's
+    ``time_scalar`` does.
+
+    :param effect: The :class: `schema.LinearTimeWarp` to describe.
+
+    :return: The ``effect`` element.
+    """
+    effect_e = cElementTree.Element("effect")
+    _append_new_sub_element(effect_e, "name", text="Time Remap")
+    _append_new_sub_element(effect_e, "effectid", text="timeremap")
+    _append_new_sub_element(effect_e, "effectcategory", text="motion")
+    _append_new_sub_element(effect_e, "effecttype", text="motion")
+    _append_new_sub_element(effect_e, "mediatype", text="video")
+
+    time_scalar = effect.time_scalar
+
+    speed_e = _append_new_sub_element(effect_e, "parameter")
+    _append_new_sub_element(speed_e, "parameterid", text="speed")
+    _append_new_sub_element(speed_e, "name", text="speed")
+    _append_new_sub_element(speed_e, "valuemin", text="-100000")
+    _append_new_sub_element(speed_e, "valuemax", text="100000")
+    _append_new_sub_element(
+        speed_e, "value", text=f"{abs(time_scalar) * 100:.0f}"
+    )
+
+    reverse_e = _append_new_sub_element(effect_e, "parameter")
+    _append_new_sub_element(reverse_e, "parameterid", text="reverse")
+    _append_new_sub_element(reverse_e, "name", text="reverse")
+    _append_new_sub_element(
+        reverse_e, "value", text="TRUE" if time_scalar < 0 else "FALSE"
+    )
+
+    return effect_e
+
+
+def _build_filter(effect):
+    """
+    Builds a ``filter`` element for the provided effect.
+
+    :param effect: The :class: `schema.Effect` to describe.
+
+    :return: The ``filter`` element, or None for an effect we have nothing
+        to say about - it is better to leave it out than to write a filter
+        the reading application cannot interpret.
+    """
+    # An effect read from XML keeps the whole effect tree in its metadata, so
+    # put that back rather than trying to reconstruct it.
+    effect_metadata = effect.metadata.get(META_NAMESPACE)
+    if effect_metadata:
+        effect_e = _dict_to_xml_tree(effect_metadata, "effect")
+        if effect.name and effect_e.find("./name") is None:
+            _append_new_sub_element(effect_e, "name", text=effect.name)
+    elif isinstance(effect, schema.LinearTimeWarp):
+        # Covers FreezeFrame too, which is a LinearTimeWarp of scalar zero.
+        effect_e = _build_time_remap_effect(effect)
+    else:
+        return None
+
+    filter_e = cElementTree.Element("filter")
+    filter_e.append(effect_e)
+
+    return filter_e
+
+
+def _build_filters(clip_item):
+    """
+    Builds the ``filter`` elements for a clip's effects, skipping any that
+    don't translate.
+    """
+    filters = (_build_filter(effect) for effect in clip_item.effects)
+
+    return [filter_e for filter_e in filters if filter_e is not None]
 
 
 def _build_marker(marker):

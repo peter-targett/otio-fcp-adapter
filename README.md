@@ -22,7 +22,7 @@ The following features of OTIO are supported by the `fcp_xml` adapter:
 |Nesting                  | ✔       |
 |Transitions              | ✖       |
 |Audio/Video Effects      | ✖       |
-|Linear Speed Effects     | ✖       |
+|Linear Speed Effects     | ✔       |
 |Fancy Speed Effects      | ✖       |
 |Color Decision List      | ✖       |
 |Image Sequence Reference | W-O     |
