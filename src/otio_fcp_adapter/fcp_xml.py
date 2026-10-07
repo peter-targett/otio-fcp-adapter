@@ -1386,6 +1386,24 @@ def _build_timecode(time, fps, drop_frame=False, additional_metadata=None):
     return tc_element
 
 
+def _retime_time_scalar(item):
+    """
+    Returns the time scalar of an item retimed at a constant rate, forwards
+    or in reverse, from its :class: `schema.LinearTimeWarp`, or None for an
+    item at normal speed or a freeze frame. A freeze frame's in point is the
+    frame held, which needs no conversion.
+    """
+    for effect in item.effects:
+        if isinstance(effect, schema.FreezeFrame):
+            return None
+        if isinstance(effect, schema.LinearTimeWarp):
+            time_scalar = effect.time_scalar
+            if time_scalar != 0 and time_scalar != 1.0:
+                return time_scalar
+            return None
+    return None
+
+
 def _build_item_timings(
     item_e,
     item,
@@ -1403,6 +1421,44 @@ def _build_item_timings(
     source_end = (item.source_range.end_time_exclusive() - timecode)
     source_end = source_end.rescaled_to(item_rate)
 
+    # An item's duration is its media's, as FCP writes it, not the length
+    # used. Premiere takes an item offline if its out point goes beyond its
+    # duration, as a transition's handles can take it.
+    #
+    # A retimed item's in and out are in its retimed time, as FCP writes
+    # them, and its duration is its media's at that speed. OTIO's
+    # source_range.duration is the length on the timeline whatever the
+    # speed, so out stays in plus that.
+    #
+    # Going forwards, the media frame at the in point is in * speed. In
+    # reverse the in point counts back from the end of the media instead,
+    # the first frame shown being media duration - 1 - in * speed, which
+    # needs the media's duration.
+    time_scalar = _retime_time_scalar(item)
+    media_reference = getattr(item, "media_reference", None)
+    available_range = getattr(media_reference, "available_range", None)
+    duration = None
+    if available_range is not None:
+        duration = available_range.duration.rescaled_to(item_rate)
+    if time_scalar is not None and (time_scalar > 0 or available_range):
+        speed = abs(time_scalar)
+        length = item.source_range.duration.rescaled_to(item_rate).value
+        if time_scalar > 0:
+            in_value = source_start.value / speed
+        else:
+            media_duration = available_range.duration.rescaled_to(
+                item_rate
+            ).value
+            in_value = (
+                media_duration - (source_start.value + length * speed)
+            ) / speed
+        # Whole frames, and no "-0" from a reverse using its media's end
+        in_value = round(in_value)
+        source_start = opentime.RationalTime(in_value, item_rate)
+        source_end = opentime.RationalTime(in_value + length, item_rate)
+        if duration is not None:
+            duration = opentime.RationalTime(duration.value / speed, item_rate)
+
     start = f'{timeline_range.start_time.value:.0f}'
     end = f'{timeline_range.end_time_exclusive().value:.0f}'
 
@@ -1415,9 +1471,13 @@ def _build_item_timings(
         end = '-1'
         source_end += transition_offsets[1]
 
+    # Without the media's range, the length used, handles included
+    if duration is None:
+        duration = source_end - source_start
+
     _append_new_sub_element(
         item_e, 'duration',
-        text=f'{item.source_range.duration.value:.0f}'
+        text=f'{duration.value:.0f}'
     )
     _append_new_sub_element(item_e, 'start', text=start)
     _append_new_sub_element(item_e, 'end', text=end)
@@ -1593,16 +1653,33 @@ def _build_transition_item(
 
     # Only add an effect if it didn't already come in from the metadata dict
     if not transition_e.find("./effect"):
-        try:
-            effectid = transition_item.metadata[META_NAMESPACE]["effectid"]
-        except KeyError:
-            effectid = "Cross Dissolve"
+        effectid = transition_item.metadata.get(META_NAMESPACE, {}).get(
+            "effectid"
+        )
 
         effect_e = _append_new_sub_element(transition_e, 'effect')
-        _append_new_sub_element(effect_e, 'name', text=transition_item.name)
-        _append_new_sub_element(effect_e, 'effectid', text=effectid)
-        _append_new_sub_element(effect_e, 'effecttype', text='transition')
-        _append_new_sub_element(effect_e, 'mediatype', text='video')
+        if effectid is None:
+            # The Cross Dissolve as FCP writes it, in full
+            for tag, text in (
+                ('name', 'Cross Dissolve'),
+                ('effectid', 'Cross Dissolve'),
+                ('effectcategory', 'Dissolve'),
+                ('effecttype', 'transition'),
+                ('mediatype', 'video'),
+                ('wipecode', '0'),
+                ('wipeaccuracy', '100'),
+                ('startratio', '0'),
+                ('endratio', '1'),
+                ('reverse', 'FALSE'),
+            ):
+                _append_new_sub_element(effect_e, tag, text=text)
+        else:
+            _append_new_sub_element(
+                effect_e, 'name', text=transition_item.name or effectid
+            )
+            _append_new_sub_element(effect_e, 'effectid', text=effectid)
+            _append_new_sub_element(effect_e, 'effecttype', text='transition')
+            _append_new_sub_element(effect_e, 'mediatype', text='video')
 
     return transition_e
 
@@ -1895,9 +1972,10 @@ def _build_time_remap_effect(effect):
     _append_new_sub_element(speed_e, "name", text="speed")
     _append_new_sub_element(speed_e, "valuemin", text="-100000")
     _append_new_sub_element(speed_e, "valuemax", text="100000")
-    _append_new_sub_element(
-        speed_e, "value", text=f"{abs(time_scalar) * 100:.0f}"
-    )
+    # Up to 4 decimal places, as a frame rate change can give a speed
+    # like 95.904%, which as a whole percentage drifts over a long clip.
+    speed = f"{abs(time_scalar) * 100:.4f}".rstrip("0").rstrip(".")
+    _append_new_sub_element(speed_e, "value", text=speed)
 
     reverse_e = _append_new_sub_element(effect_e, "parameter")
     _append_new_sub_element(reverse_e, "parameterid", text="reverse")
