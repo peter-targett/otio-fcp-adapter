@@ -1613,6 +1613,89 @@ class AdaptersFcp7XmlTest(unittest.TestCase, test_utils.OTIOAssertions):
         # OTIO -> tempfile.xml
         adapters.write_to_file(timeline, tmp_path)
 
+    def test_retime_source_in(self):
+        # A retimed clip's in point is a whole frame in retimed time, so
+        # the exact media frame at it goes in the Time Remap effect.
+        rate = 25
+        media_start = 1000
+        media_frames = 6000
+
+        def rt(value):
+            return opentime.RationalTime(value, rate)
+
+        # speed, lowest media frame used, length: in point, sourcein
+        cases = [
+            (2.0, 201, 50, "100", "201"),
+            (0.5, 301, 50, "602", "301"),
+            (3.0, 1000, 30, "333", "1000"),
+            # Reversed, the first frame shown is the last one used
+            (-1.0, 2000, 50, "3950", "2049"),
+            # 99 media frames used, 3001 to 3099
+            (-2.0, 3001, 50, "1450", "3099"),
+            # After a dissolve with a 5 frame handle, which both take in
+            (0.5, 4001, 50, "7997", "3998.5"),
+        ]
+
+        timeline = schema.Timeline(name="retimes")
+        track = schema.Track(kind=schema.TrackKind.Video)
+        timeline.tracks.append(track)
+        for speed, offset, length, _, _ in cases:
+            clip = schema.Clip(
+                name=f"speed {speed}",
+                source_range=opentime.TimeRange(
+                    rt(media_start + offset), rt(length)
+                ),
+                media_reference=schema.ExternalReference(
+                    target_url="file:///media/a.mov",
+                    available_range=opentime.TimeRange(
+                        rt(media_start), rt(media_frames)
+                    ),
+                ),
+            )
+            clip.effects.append(schema.LinearTimeWarp(time_scalar=speed))
+            track.append(clip)
+        track.insert(
+            len(cases) - 1,
+            schema.Transition(
+                transition_type=schema.TransitionTypes.SMPTE_Dissolve,
+                in_offset=rt(5),
+                out_offset=rt(5),
+            ),
+        )
+
+        # Neither a clip at normal speed nor a freeze frame needs it
+        for effect in (None, schema.FreezeFrame()):
+            clip = schema.Clip(
+                name="not retimed",
+                source_range=opentime.TimeRange(rt(media_start + 10), rt(20)),
+                media_reference=schema.ExternalReference(
+                    target_url="file:///media/a.mov",
+                    available_range=opentime.TimeRange(
+                        rt(media_start), rt(media_frames)
+                    ),
+                ),
+            )
+            if effect is not None:
+                clip.effects.append(effect)
+            track.append(clip)
+
+        xml = adapters.write_to_string(timeline, adapter_name="fcp_xml")
+        clip_items = cElementTree.fromstring(xml).findall(".//clipitem")
+        self.assertEqual(len(clip_items), len(cases) + 2)
+
+        def source_in(clip_item):
+            return clip_item.find(
+                "./filter/effect/parameter[parameterid='sourcein']"
+            )
+
+        for clip_item, case in zip(clip_items, cases):
+            self.assertEqual(clip_item.find("./in").text, case[3], case)
+            self.assertEqual(source_in(clip_item).find("./value").text, case[4], case)
+
+        for clip_item in clip_items[len(cases):]:
+            self.assertEqual(clip_item.find("./in").text, "10")
+            self.assertIsNone(source_in(clip_item))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1404,6 +1404,46 @@ def _retime_time_scalar(item):
     return None
 
 
+def _retime_source_length(length, speed):
+    """
+    Returns the number of media frames an item of the given length on the
+    timeline uses at the given speed. Timeline frame i shows media frame
+    floor(i * speed), so this is one more than the last frame's.
+    """
+    return math.floor((length - 1) * abs(speed)) + 1
+
+
+def _retime_source_in(item, timecode, transition_offsets):
+    """
+    Returns the media frame at the in point of an item retimed at a constant
+    rate, counted from the start of its media, or None for an item at normal
+    speed or a freeze frame.
+
+    The in point itself can't give this exactly. It's a whole frame in
+    retimed time, so at a speed of N only every Nth media frame can be
+    written.
+
+    In reverse the first frame shown is the last frame of the media the
+    item uses, as source_range.start_time is always the lowest. Like the in
+    point, the result takes in the handle of a transition into the item, so
+    it can be a fraction of a frame.
+    """
+    time_scalar = _retime_time_scalar(item)
+    if time_scalar is None:
+        return None
+    item_rate = item.source_range.start_time.rate
+    source_in = (item.source_range.start_time - timecode).rescaled_to(
+        item_rate
+    ).value
+    if time_scalar < 0:
+        length = item.source_range.duration.rescaled_to(item_rate).value
+        source_in += _retime_source_length(length, time_scalar) - 1
+    if transition_offsets[0] is not None:
+        handle = transition_offsets[0].rescaled_to(item_rate).value
+        source_in -= handle * time_scalar
+    return source_in
+
+
 def _build_item_timings(
     item_e,
     item,
@@ -1434,6 +1474,9 @@ def _build_item_timings(
     # reverse the in point counts back from the end of the media instead,
     # the first frame shown being media duration - 1 - in * speed, which
     # needs the media's duration.
+    #
+    # The in point is rounded to a whole frame, so the Time Remap effect
+    # also gets the exact media frame, see _retime_source_in().
     time_scalar = _retime_time_scalar(item)
     media_reference = getattr(item, "media_reference", None)
     available_range = getattr(media_reference, "available_range", None)
@@ -1450,7 +1493,8 @@ def _build_item_timings(
                 item_rate
             ).value
             in_value = (
-                media_duration - (source_start.value + length * speed)
+                media_duration
+                - (source_start.value + _retime_source_length(length, speed))
             ) / speed
         # Whole frames, and no "-0" from a reverse using its media's end
         in_value = round(in_value)
@@ -1720,7 +1764,9 @@ def _build_clip_item_without_media(
         media_start_time,
     )
 
-    clip_item_e.extend(_build_filters(clip_item))
+    clip_item_e.extend(
+        _build_filters(clip_item, media_start_time, transition_offsets)
+    )
 
     return clip_item_e
 
@@ -1798,7 +1844,9 @@ def _build_clip_item(clip_item, timeline_range, transition_offsets, br_map):
         timecode
     )
 
-    clip_item_e.extend(_build_filters(clip_item))
+    clip_item_e.extend(
+        _build_filters(clip_item, timecode, transition_offsets)
+    )
 
     return clip_item_e
 
@@ -1946,7 +1994,7 @@ def _build_top_level_track(track, track_rate, br_map):
     return track_e
 
 
-def _build_time_remap_effect(effect):
+def _build_time_remap_effect(effect, source_in=None):
     """
     Builds the FCP XML "Time Remap" effect for a :class: `schema.LinearTimeWarp`.
 
@@ -1955,6 +2003,10 @@ def _build_time_remap_effect(effect):
     ``time_scalar`` does.
 
     :param effect: The :class: `schema.LinearTimeWarp` to describe.
+    :param source_in: The media frame at the item's in point, from
+        :func: `_retime_source_in`, written as a ``sourcein`` parameter.
+        This isn't one of FCP's own parameters. It's for a reader that
+        wants the exact frame, which the item's in point can't always give.
 
     :return: The ``effect`` element.
     """
@@ -1984,14 +2036,23 @@ def _build_time_remap_effect(effect):
         reverse_e, "value", text="TRUE" if time_scalar < 0 else "FALSE"
     )
 
+    if source_in is not None:
+        source_in_e = _append_new_sub_element(effect_e, "parameter")
+        _append_new_sub_element(source_in_e, "parameterid", text="sourcein")
+        _append_new_sub_element(source_in_e, "name", text="sourcein")
+        value = f"{source_in:.4f}".rstrip("0").rstrip(".")
+        _append_new_sub_element(source_in_e, "value", text=value)
+
     return effect_e
 
 
-def _build_filter(effect):
+def _build_filter(effect, source_in=None):
     """
     Builds a ``filter`` element for the provided effect.
 
     :param effect: The :class: `schema.Effect` to describe.
+    :param source_in: The media frame at a retimed item's in point, see
+        :func: `_build_time_remap_effect`.
 
     :return: The ``filter`` element, or None for an effect we have nothing
         to say about - it is better to leave it out than to write a filter
@@ -2006,7 +2067,7 @@ def _build_filter(effect):
             _append_new_sub_element(effect_e, "name", text=effect.name)
     elif isinstance(effect, schema.LinearTimeWarp):
         # Covers FreezeFrame too, which is a LinearTimeWarp of scalar zero.
-        effect_e = _build_time_remap_effect(effect)
+        effect_e = _build_time_remap_effect(effect, source_in)
     else:
         return None
 
@@ -2016,12 +2077,19 @@ def _build_filter(effect):
     return filter_e
 
 
-def _build_filters(clip_item):
+def _build_filters(clip_item, timecode, transition_offsets):
     """
     Builds the ``filter`` elements for a clip's effects, skipping any that
     don't translate.
+
+    :param timecode: The start time of the clip's media, and
+    :param transition_offsets: the handles of the transitions either side,
+        both as given to :func: `_build_item_timings`.
     """
-    filters = (_build_filter(effect) for effect in clip_item.effects)
+    source_in = _retime_source_in(clip_item, timecode, transition_offsets)
+    filters = (
+        _build_filter(effect, source_in) for effect in clip_item.effects
+    )
 
     return [filter_e for filter_e in filters if filter_e is not None]
 
